@@ -30,10 +30,10 @@ Unlike expensive, closed-source commercial gadgets, **espSAK** gives you total f
 
 ## 📸 Device & UI Gallery
 
-| Main Interface & Wi-Fi Analysis | Bluetooth & Tracker Radar |
+| Logo screen | Info screen |
 | :---: | :---: |
 | <img src="images/img1.jpg" alt="espSAK View 1" width="100%"> | <img src="images/img2.jpg" alt="espSAK View 2" width="100%"> |
-| **Captive Portal & System Info** | **Hardware Build & Portability** |
+| Wireless monitor | BT tracker |
 | <img src="images/img3.jpg" alt="espSAK View 3" width="100%"> | <img src="images/img4.jpg" alt="espSAK View 4" width="100%"> |
 
 ---

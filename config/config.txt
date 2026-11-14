@@ -1,0 +1,10 @@
+# espSAK config (editable; rewritten by the device)
+brightness=1
+captive_ssid=freeWifi
+websrv_ssid=espSAK-files
+websrv_pass=
+longpress_ms=400
+idle_min=5
+captive_html=/config/free.html
+captive_ip=192.168.1.1
+websrv_ip=192.168.4.1

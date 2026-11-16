@@ -1,0 +1,13 @@
+{
+  "name": "espSAK",
+  "version": "0.27",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "espSAK.merged.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flash espSAK</title>
+<style>
+  :root{color-scheme:light dark}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:0 auto;padding:32px 20px;line-height:1.55;color:#1b1f27;background:#fff}
+  @media (prefers-color-scheme:dark){body{background:#0f1115;color:#e8e8e8}.card{background:#1b1f27!important;border-color:#2b313c!important}code{background:#2b313c!important}}
+  h1{font-size:28px;margin:0 0 4px}
+  .sub{color:#777;margin:0 0 24px}
+  .card{background:#f6f7f9;border:1px solid #e3e6ea;border-radius:12px;padding:20px;margin:18px 0}
+  .btn{display:flex;justify-content:center;margin:24px 0}
+  ol{padding-left:20px} li{margin:6px 0}
+  code{background:#eef0f3;padding:2px 6px;border-radius:4px;font-size:.9em}
+  .warn{font-size:14px;color:#a06000;background:#fff7e6;border:1px solid #ffe2a8;border-radius:8px;padding:10px 12px}
+  @media (prefers-color-scheme:dark){.warn{color:#ffcc66;background:#2a2410;border-color:#5a4a1a}}
+  footer{margin-top:40px;font-size:13px;color:#999;text-align:center}
+</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+
+  <h1>⚡ Flash espSAK</h1>
+  <p class="sub">Install the espSAK firmware on your TTGO T-Display straight from the browser — no IDE, no drivers to configure.</p>
+
+  <div class="card">
+    <strong>1. Connect</strong> your TTGO T-Display with a USB-C <em>data</em> cable.<br>
+    <strong>2. Click Install</strong> below and pick the serial port that appears.<br>
+    <strong>3. Wait</strong> for the flash to finish, then the device reboots into espSAK.
+  </div>
+
+  <div class="btn">
+    <esp-web-install-button manifest="./manifest.json">
+      <button slot="activate" style="font-size:18px;padding:14px 28px;border:0;border-radius:10px;background:#1565c0;color:#fff;cursor:pointer">
+        Install espSAK
+      </button>
+      <span slot="unsupported">⚠️ Your browser does not support Web Serial. Use desktop <b>Chrome</b> or <b>Edge</b>.</span>
+      <span slot="not-allowed">⚠️ This page must be served over <b>https</b> (or localhost).</span>
+    </esp-web-install-button>
+  </div>
+
+  <p class="warn">
+    Works only in <b>Chrome</b> or <b>Edge</b> on desktop (Web Serial). Make sure the cable carries data, not just power.
+    If the port does not appear, install the CH9102 / CP2102 USB-serial driver for your OS.
+  </p>
+
+  <h3>Troubleshooting</h3>
+  <ol>
+    <li>No port listed → it is a charge-only cable or the USB-serial driver is missing.</li>
+    <li>Flash fails to start → hold the <b>BOOT</b> button (Button 2 / GPIO0), tap <b>RESET</b>, release BOOT, then retry.</li>
+    <li>Flashing does not touch your microSD card — your <code>/config</code> and logs stay intact.</li>
+  </ol>
+
+  <footer>espSAK — ESP32 Swiss Army Knife · flashed with <a href="https://esphome.github.io/esp-web-tools/" target="_blank" rel="noopener">ESP Web Tools</a></footer>
+</body>
+</html>

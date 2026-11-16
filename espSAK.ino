@@ -37,6 +37,11 @@
 //        "Default (internal)" + every /config/*.html; selection saved to
 //        captive_html (empty/invalid = internal). /config/index.html kept as
 //        an editable template.
+// v0.27: BT tools -> "5-Advertise": broadcast as a generic BLE peripheral
+//        (named / iBeacon) from /config/ble_devices.txt. Passive dev/test use.
+// v0.28: each advertiser gets its own static-random MAC (4th cfg field, else
+//        derived from the name); iBeacon built as raw bytes and started from
+//        the GAP "data ready" event (fixes empty-payload advertising).
 //
 // IMPORTANT: compile with Partition Scheme = "Huge APP (3MB No OTA/1MB SPIFFS)".
 //
@@ -52,12 +57,15 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
+#include <esp_gap_ble_api.h>
+#include <esp_bt.h>
+#include <esp_bt_main.h>
 //#include <MFRC522.h>
 #include <FS.h>
 #include <SD.h>
+#include <Button2.h>
 #include "espsak.h"
 #include "webpage.h"
-#include "Button2.h"
 #include "Free_Fonts.h"
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
@@ -86,7 +94,7 @@ Button2 btn2(BUTTON_2);
 TFT_eSPI tft = TFT_eSPI();
 BluetoothSerial SerialBT;
 
-String version = "0.26";
+String version = "0.28";
 
 char buff[512];
 int vref = 1100;
@@ -160,7 +168,7 @@ int sdMenuPos = 0;
 const int SD_MENU_MAX = 2;   // items 0..2 (Explore / Wipe / Web srv)
 SdMode sdMode = SDM_LIST;
 
-enum BtMode { BTM_MENU, BTM_DISCOVERY, BTM_SPP, BTM_BLESCAN, BTM_TRACKERS, BTM_WATCH };
+enum BtMode { BTM_MENU, BTM_DISCOVERY, BTM_SPP, BTM_BLESCAN, BTM_TRACKERS, BTM_WATCH, BTM_ADV_LIST, BTM_ADV_ON };
 BtMode btMode = BTM_MENU;
 
 bool intentNext = false, intentSelect = false, intentBack = false;
@@ -168,6 +176,7 @@ bool intentNext = false, intentSelect = false, intentBack = false;
 const int max_menu = 6;
 int menu_pos = 0;
 
+static uint8_t advRaw[31];
 // ------------------------------------------------------------------
 //  Battery (1S LiPo)
 // ------------------------------------------------------------------
@@ -1526,7 +1535,60 @@ void sdOnBack()
 // ==================================================================
 //  BLUETOOTH (Fase 3 - Classic part)
 // ==================================================================
-const int BT_MENU_MAX = 3;   // items 0..3
+const int BT_MENU_MAX = 4;   // items 0..4
+
+// ---- BLE advertiser (generic: named / iBeacon / Eddystone) ----
+#define MAX_ADV 20
+struct AdvEntry { char name[24]; char type[10]; char params[80]; uint8_t mac[6]; };
+AdvEntry advList[MAX_ADV];
+int advCount = 0;
+int advCursor = 0;
+int advActive = -1;          // index currently advertising, -1 = none
+uint8_t advMfr[25];          // iBeacon manufacturer data (the stack wraps it)
+esp_ble_adv_params_t advParams;
+
+// adv-data config is asynchronous: start advertising only once it completes
+void advGapCB(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+  switch (event) {
+    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+      Serial.printf("[adv] DATA_SET status=%d -> start\n", param->adv_data_cmpl.status);
+      esp_ble_gap_start_advertising(&advParams);
+      break;
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+      Serial.printf("[adv] ADV_START status=%d\n", param->adv_start_cmpl.status);
+      break;
+    case ESP_GAP_BLE_SET_STATIC_RAND_ADDR_EVT:
+      Serial.printf("[adv] SET_RAND_ADDR status=%d\n", param->set_rand_addr_cmpl.status);
+      break;
+    
+case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
+  esp_ble_gap_start_advertising(&advParams);
+  break;
+    default: break;
+  }
+}
+
+// bring up a private BLE stack for the advertiser (no BLEDevice; modal use only)
+void bleAdvInit()
+{
+  esp_bt_controller_config_t cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+  esp_err_t a = esp_bt_controller_init(&cfg);
+  esp_err_t b = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+  esp_err_t c = esp_bluedroid_init();
+  esp_err_t d = esp_bluedroid_enable();
+  esp_ble_gap_register_callback(advGapCB);
+  Serial.printf("[adv] init ctrl=%d en=%d bd=%d bden=%d\n", a, b, c, d);
+}
+
+void bleAdvDeinit()
+{
+  esp_ble_gap_stop_advertising();
+  esp_bluedroid_disable();
+  esp_bluedroid_deinit();
+  esp_bt_controller_disable();
+  esp_bt_controller_deinit();
+}
 int btMenuPos = 0;
 
 // --- SPP console ---
@@ -2206,13 +2268,270 @@ void drawCarouselItem(const char *label, uint16_t color)
   drawBatteryChip();
 }
 
+// ---------------- BLE advertiser ----------------
+void writeDefaultAdvCfg()
+{
+  if (!sd_init) return;
+  ensureConfigFolder();
+  File f = SD.open("/config/ble_devices.txt", FILE_WRITE);
+  if (!f) return;
+  f.println("# espSAK - BLE advertiser definitions");
+  f.println("# One device per line:  name | type | params | mac(optional)");
+  f.println("#   named   | <advertised name>");
+  f.println("#   ibeacon | <uuid>,<major>,<minor>");
+  f.println("# mac is optional; if omitted it is derived from the name.");
+  f.println("# A fixed mac must start C0..FF (BLE static-random address).");
+  f.println("# Lines starting with # and blank lines are ignored.");
+  f.println();
+  f.println("Test Device   | named   | espSAK-BLE                              | C0:00:00:00:00:01");
+  f.println("My Wearable   | named   | FitBand-X                               | C0:00:00:00:00:02");
+  f.println("Lab Beacon 1  | ibeacon | E2C56DB5-DFFB-48D2-B060-D0F5A71096E0,1,1 | C0:00:00:00:00:03");
+  f.println("Lab Beacon 2  | ibeacon | E2C56DB5-DFFB-48D2-B060-D0F5A71096E0,10,5");
+  f.println("Desk Beacon   | ibeacon | 8EC76EA3-6668-48DA-9866-75BE8BC86F4D,100,200");
+  f.close();
+}
+
+// parse "AA:BB:CC:DD:EE:FF" -> out[6]; returns true if 6 valid bytes
+bool parseMac(String s, uint8_t out[6])
+{
+  s.trim();
+  if (s.length() == 0) return false;
+  int n = 0, start = 0;
+  for (int i = 0; i <= (int)s.length() && n < 6; i++) {
+    if (i == (int)s.length() || s[i] == ':') {
+      String b = s.substring(start, i); b.trim();
+      if (b.length() == 0) return false;
+      out[n++] = (uint8_t)strtol(b.c_str(), NULL, 16);
+      start = i + 1;
+    }
+  }
+  return n == 6;
+}
+
+// deterministic static-random mac from a name (so each item is stable + distinct)
+void macFromName(const char *s, uint8_t out[6])
+{
+  uint32_t h1 = 2166136261u, h2 = 0x811c9dc5u;
+  for (const char *p = s; *p; p++) { h1 = (h1 ^ (uint8_t)*p) * 16777619u; h2 = h2 * 31 + (uint8_t)*p; }
+  out[0] = (h1 >> 24) & 0xFF; out[1] = (h1 >> 16) & 0xFF; out[2] = (h1 >> 8) & 0xFF;
+  out[3] = h1 & 0xFF;         out[4] = (h2 >> 8) & 0xFF;  out[5] = h2 & 0xFF;
+  out[0] = (out[0] & 0x3F) | 0xC0;   // force the top two bits -> BLE static random
+}
+
+void parseAdvLine(String line)
+{
+  if (advCount >= MAX_ADV) return;
+  // split into up to 4 fields on '|'
+  String f[4]; int nf = 0, start = 0;
+  for (int i = 0; i <= (int)line.length() && nf < 4; i++) {
+    if (i == (int)line.length() || line[i] == '|') {
+      f[nf] = line.substring(start, i); f[nf].trim(); nf++;
+      start = i + 1;
+    }
+  }
+  if (nf < 2 || f[0].length() == 0) return;
+  String nm = f[0], ty = f[1], pa = (nf >= 3) ? f[2] : "";
+  strncpy(advList[advCount].name,   nm.c_str(), 24); advList[advCount].name[23] = 0;
+  strncpy(advList[advCount].type,   ty.c_str(), 10); advList[advCount].type[9]  = 0;
+  strncpy(advList[advCount].params, pa.c_str(), 80); advList[advCount].params[79] = 0;
+  // mac: 4th field if valid, else derived from the name
+  uint8_t m[6];
+  if (nf >= 4 && parseMac(f[3], m)) {
+    m[0] = (m[0] & 0x3F) | 0xC0;           // ensure static-random
+    memcpy(advList[advCount].mac, m, 6);
+  } else {
+    macFromName(advList[advCount].name, advList[advCount].mac);
+  }
+  advCount++;
+}
+
+void loadAdvList()
+{
+  advCount = 0;
+  if (!sd_init) return;
+  ensureConfigFolder();
+  if (!SD.exists("/config/ble_devices.txt")) writeDefaultAdvCfg();
+  File f = SD.open("/config/ble_devices.txt", FILE_READ);
+  if (!f) return;
+  while (f.available() && advCount < MAX_ADV) {
+    String line = f.readStringUntil('\n'); line.trim();
+    if (line.length() == 0 || line.startsWith("#")) continue;
+    parseAdvLine(line);
+  }
+  f.close();
+}
+
+uint8_t hexByte(String &s, int pos)
+{
+  if (pos + 1 >= (int)s.length()) return 0;
+  char b[3] = { s[pos], s[pos + 1], 0 };
+  return (uint8_t)strtol(b, NULL, 16);
+}
+
+// fill advMfr[] with the iBeacon manufacturer-data body; returns its length (25)
+int buildIBeaconMfr(int idx)
+{
+  AdvEntry &e = advList[idx];
+  String p = String(e.params);
+  int c1 = p.indexOf(','), c2 = p.indexOf(',', c1 + 1);
+  String uuid = p.substring(0, c1); uuid.replace("-", ""); uuid.trim();
+  uint16_t major = p.substring(c1 + 1, c2).toInt();
+  uint16_t minor = p.substring(c2 + 1).toInt();
+  int n = 0;
+  advMfr[n++] = 0x4C; advMfr[n++] = 0x00;             // Apple company id
+  advMfr[n++] = 0x02; advMfr[n++] = 0x15;             // iBeacon type + length 21
+  for (int i = 0; i < 16; i++) advMfr[n++] = hexByte(uuid, i * 2);
+  advMfr[n++] = (major >> 8) & 0xFF; advMfr[n++] = major & 0xFF;
+  advMfr[n++] = (minor >> 8) & 0xFF; advMfr[n++] = minor & 0xFF;
+  advMfr[n++] = 0xC5;                                 // measured power (-59 dBm)
+  return n;
+}
+
+void renderAdvOn()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setFreeFont(FM12);
+  tft.setTextColor(TFT_BLUE, TFT_BLACK);
+  tft.drawString("Advertising", 2, 2);
+  drawRadioIcons();
+  tft.setFreeFont(FM9);
+  if (advActive >= 0) {
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(String(advList[advActive].name), 2, 40);
+    tft.setTextColor(TFT_GOLD, TFT_BLACK);
+    tft.drawString(String(advList[advActive].type), 2, 60);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(String(advList[advActive].params).substring(0, 28), 2, 80);
+    uint8_t *m = advList[advActive].mac;
+    sprintf(buff, "mac %02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(String(buff), 2, 98);
+  }
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("B1-long: stop", 2, 120);
+}
+
+// convierte una cadena hex ("1BFF4C00...") en bytes; ignora separadores no-hex
+int hexStringToBytes(const String &hex, uint8_t *out, int maxLen)
+{
+  int n = 0, i = 0, L = hex.length();
+  while (i + 1 < L && n < maxLen) {
+    char c1 = hex[i], c2 = hex[i + 1];
+    if (!isxdigit((unsigned char)c1) || !isxdigit((unsigned char)c2)) { i++; continue; }
+    char b[3] = { c1, c2, 0 };
+    out[n++] = (uint8_t)strtol(b, NULL, 16);
+    i += 2;
+  }
+  return n;
+}
+void startAdv(int idx)
+{
+  AdvEntry &e = advList[idx];
+  String type = String(e.type);
+
+  esp_ble_gap_stop_advertising();
+
+  advParams = {};
+  advParams.adv_int_min = 0x30;
+  advParams.adv_int_max = 0x60;
+  advParams.adv_type = ADV_TYPE_IND;
+  advParams.own_addr_type = BLE_ADDR_TYPE_RANDOM;
+  advParams.channel_map = ADV_CHNL_ALL;
+  advParams.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
+
+  esp_err_t r1 = esp_ble_gap_set_rand_addr(e.mac);            // this item's own MAC
+
+  if (type == "raw") {
+    // params = paquete AD completo en hex (length+type+payload, ya listo)
+    int len = hexStringToBytes(String(e.params), advRaw, sizeof(advRaw));
+    if (len <= 0 || len > 31) {
+      Serial.printf("[adv] '%s' raw: longitud invalida (%d)\n", e.name, len);
+      return;
+    }
+    esp_err_t r2 = esp_ble_gap_config_adv_data_raw(advRaw, len);
+    Serial.printf("[adv] '%s' type=raw len=%d set_rand_addr=%d config_adv_data_raw=%d\n",
+                  e.name, len, r1, r2);
+  }
+  else {
+    esp_ble_adv_data_t d = {};
+    d.set_scan_rsp = false;
+    d.include_txpower = false;
+    d.flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+
+    if (type == "ibeacon") {
+      int len = buildIBeaconMfr(idx);
+      d.flag = 0;                                               // sin flags AD -> 3 bytes menos
+      d.include_name = false;
+      d.manufacturer_len = len;
+      d.p_manufacturer_data = advMfr;
+    } else {                                                     // named
+      String nm = (strlen(e.params) > 0) ? String(e.params) : String(e.name);
+      esp_ble_gap_set_device_name(nm.c_str());
+      d.include_name = true;
+    }
+    esp_err_t r2 = esp_ble_gap_config_adv_data(&d);               // callback arranca adv cuando esté listo
+    Serial.printf("[adv] '%s' type=%s set_rand_addr=%d config_adv_data=%d\n",
+                  e.name, e.type, r1, r2);
+  }
+
+  advActive = idx;
+  btMode = BTM_ADV_ON;
+  renderAdvOn();
+}
+
+void stopAdv()
+{
+  if (advActive >= 0) { esp_ble_gap_stop_advertising(); advActive = -1; }
+}
+
+void renderAdvList()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setFreeFont(FM12);
+  tft.setTextColor(TFT_BLUE, TFT_BLACK);
+  tft.drawString("Advertise", 2, 2);
+  drawRadioIcons();
+  tft.setFreeFont(FM9);
+  if (advCount == 0) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString(sd_init ? "no ble_devices.txt" : "SD not mounted", 2, 40);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("B1-long: back", 2, 120);
+    return;
+  }
+  int page = advCursor / 6, start = page * 6, line = 24;
+  for (int i = start; i < start + 6 && i < advCount; i++) {
+    bool sel = (i == advCursor);
+    tft.setTextColor(sel ? TFT_GREEN : TFT_GOLD, TFT_BLACK);
+    sprintf(buff, "%s%s (%s)", sel ? ">" : " ", advList[i].name, advList[i].type);
+    tft.drawString(String(buff).substring(0, 28), 2, line);
+    line += 15;
+  }
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  sprintf(buff, "%d/%d B2:mv B1:adv L:back", advCursor + 1, advCount);
+  tft.drawString(String(buff), 2, 120);
+}
+
+void enterAdvList()
+{
+  btMode = BTM_ADV_LIST;
+  advActive = -1;
+  bleAdvInit();                        // private BLE stack (no BLEDevice)
+  loadAdvList();
+  advCursor = 0;
+  renderAdvList();
+}
+
 void renderBtMenu()
 {
   switch (btMenuPos) {
-    case 0: drawCarouselItem("1-Serial console", TFT_CYAN);   break;
-    case 1: drawCarouselItem("2-BT discovery",   TFT_GOLD);   break;
-    case 2: drawCarouselItem("3-BLE scan",       TFT_GREEN);  break;
-    case 3: drawCarouselItem("4-Trackers",       TFT_MAGENTA);break;
+    case 0: drawCarouselItem("1-Serial console", TFT_CYAN);    break;
+    case 1: drawCarouselItem("2-BT discovery",   TFT_GOLD);    break;
+    case 2: drawCarouselItem("3-BLE scan",       TFT_GREEN);   break;
+    case 3: drawCarouselItem("4-Trackers",       TFT_MAGENTA); break;
+    case 4: drawCarouselItem("5-Advertise",      TFT_CYAN);    break;
   }
 }
 
@@ -2254,8 +2573,12 @@ void btOnNext()
         renderTrackers();
       }
       break;
+    case BTM_ADV_LIST:
+      if (advCount > 0) { advCursor = (advCursor + 1) % advCount; renderAdvList(); }
+      break;
     case BTM_SPP:
-    case BTM_WATCH: break;
+    case BTM_WATCH:
+    case BTM_ADV_ON: break;
   }
 }
 
@@ -2265,9 +2588,12 @@ void btOnSelect()
     if (btMenuPos == 0) enterSPP();
     else if (btMenuPos == 1) enterDiscovery();
     else if (btMenuPos == 2) enterBleScan();
-    else enterTrackers();
+    else if (btMenuPos == 3) enterTrackers();
+    else enterAdvList();
   } else if (btMode == BTM_TRACKERS) {
     if (!trkScanning && trkCount > 0) enterWatch();
+  } else if (btMode == BTM_ADV_LIST) {
+    if (advCount > 0) startAdv(advCursor);
   }
 }
 
@@ -2299,6 +2625,15 @@ void btOnBack()
     case BTM_WATCH:
       BLEDevice::getScan()->stop();
       btMode = BTM_TRACKERS; renderTrackers();   // BLE stays init for the list
+      break;
+    case BTM_ADV_ON:
+      stopAdv();
+      btMode = BTM_ADV_LIST; renderAdvList();     // BLE stays init for the list
+      break;
+    case BTM_ADV_LIST:
+      stopAdv();
+      bleAdvDeinit();
+      btMode = BTM_MENU; renderBtMenu();
       break;
   }
 }

@@ -211,7 +211,7 @@ Open *4-BT tools* for a sub-menu: **Serial console · BT discovery · BLE scan �
 └───────────────────────────────────┘
 ```
 
-The advertised devices are read from `/config/ble_devices.cfg` on the SD card. See §10.
+The advertised devices are read from `/config/ble_devices.txt` on the SD card. See §10.
 
 ---
 
